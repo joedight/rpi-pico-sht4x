@@ -12,10 +12,23 @@
 #include "lwip/tcp.h"
 #include "lwip/apps/mdns.h"
 
-static const char *const wlan_ssid = WLAN_SSID;
-static const char *const wlan_pass = WLAN_PASS;
+#include "/usr/local/include/util/string.h"
 
-static const uint16_t tcp_port = 80;
+#include "config.h"
+
+void led_on(bool x)
+{
+	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, x);
+}
+
+struct measurement {
+	const char *name;
+	const char *type;
+	char *value;
+};
+
+void measure_init(void);
+struct measurement *measure_take(void);
 
 enum error {
 	ERROR_GENERIC = 1,
@@ -31,18 +44,11 @@ enum error {
 	ERROR_WRITE_BEGIN,
 	ERROR_WRITE_BEGIN_MEM,
 	ERROR_CHECKSUM_TEST,
-	ERROR_SHT_CHECKSERIAL_READ,
-	ERROR_SHT_CHECKSERIAL_WRITE,
-	ERROR_SHT_CHECKSERIAL_CHECKSUM,
-	ERROR_SHT_READ,
-	ERROR_SHT_WRITE,
-	ERROR_SHT_CHECKSUM,
 	ERROR_SERVICE_TXT,
+	ERROR_FINAL,
 };
 
-#define led_on(x) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, x)
-
-void fatal_error(enum error err)
+void fatal_error(int err)
 {
 	while (1) {
 		for (int i = 0; i < err; i++) {
@@ -53,68 +59,6 @@ void fatal_error(enum error err)
 		}
 		sleep_ms(4500);
 	}
-}
-
-enum {
-	SHT_CMD_MEASURE_HP		= 0xFD,
-	SHT_CMD_MEASURE_MP		= 0xF6,
-	SHT_CMD_MEASURE_LP		= 0xE0,
-	SHT_CMD_READSERIAL		= 0x89,
-	SHT_CMD_SOFTRESET		= 0x94,
-	SHT_CMD_HEAT_200mW_1000ms	= 0x39,
-	SHT_CMD_HEAT_200mW_100ms	= 0x32,
-	SHT_CMD_HEAT_110mW_1000ms	= 0x2F,
-	SHT_CMD_HEAT_110mW_100ms	= 0x24,
-	SHT_CMD_HEAT_20mW_1000ms	= 0x1E,
-	SHT_CMD_HEAT_20mW_100ms		= 0x15,
-
-	/* Delay for any command except heater.
-	 * Spec. says max is 8ms, so this is plenty. */
-	SHT_DELAY_MEASURE = 25,
-
-	OUR_SDA_PIN = 0,
-	OUR_CLK_PIN = 1,
-
-	OUR_I2C_ADDR = 0x44,
-};
-
-#define OUR_I2C i2c0
-
-uint8_t crc8(uint8_t *data)
-{
-	uint8_t crc = 0xFF;
-	for (int i = 0; i < 2; i++) {
-		crc ^= data[i];
-		for (int j = 0; j < 8; j++) {
-			if (crc & 0x80)
-				crc = (crc << 1) ^ 0x31;
-			else
-				crc = crc << 1;
-		}
-	}
-	return crc;
-}
-
-void sht_cmd_blocking(uint8_t cmd, uint16_t *buf)
-{
-	if (i2c_write_blocking(OUR_I2C, OUR_I2C_ADDR, &cmd, 1, false) != 1) {
-		fatal_error(ERROR_SHT_READ);
-	}
-
-	sleep_ms(SHT_DELAY_MEASURE);
-
-	uint8_t data[6] = { 0 };
-	if (i2c_read_blocking(OUR_I2C, OUR_I2C_ADDR, data, sizeof(data), false) != sizeof(data)) {
-		fatal_error(ERROR_SHT_WRITE);
-	}
-
-	if (crc8(data) != data[2])
-		fatal_error(ERROR_SHT_CHECKSUM);
-	if (crc8(data + 3) != data[5])
-		fatal_error(ERROR_SHT_CHECKSUM);
-
-	buf[0] = (data[0] << 8) | data[1];
-	buf[1] = (data[3] << 8) | data[4];
 }
 
 struct session {
@@ -147,6 +91,7 @@ err_t server_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 			fatal_error(ERROR_WRITE_PART);
 		}
 	}
+	return ERR_OK;
 }
 
 err_t server_accept(void *, struct tcp_pcb *pcb, err_t err)
@@ -156,34 +101,37 @@ err_t server_accept(void *, struct tcp_pcb *pcb, err_t err)
 		return ERR_VAL;
 	}
 
-	double temp, hum;
-	{
-		uint16_t buf[2] = {0, 0};
-		sht_cmd_blocking(SHT_CMD_MEASURE_HP, buf);
-
-		temp = (175.0 * ((double)buf[0] / 65535.0)) - 45.0;
-		hum = (125.0 * ((double)buf[1] / 65535.0)) - 6.0;
-	}
-
-	struct session *arg = malloc(sizeof(struct session));
-	asprintf(&arg->data, 
+	/* Take measurement and store. */
+	struct session *arg = calloc(1, sizeof(struct session));
+	const struct measurement *ms = measure_take();
+	arg->data = rstrcpy(
+		NULL, 
 		"HTTP/1.1 200 OK\r\n"
 		"Content-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\n"
 		"\r\n"
-		"# TYPE humid gauge\n"
-		"humid %f\n"
-		"# TYPE temp gauge\n"
-		"temp %f\n"
-		"# EOF\n",
-		hum,
-		temp
 	);
+
+	while (ms->name) {
+		arg->data = rsprintf(
+			arg->data,
+			"%s"
+			"# TYPE %s %s\n"
+			"%s %s\n",
+			arg->data,
+			ms->name, ms->type,
+			ms->name, ms->value
+		);
+		ms++;
+	}
+	arg->data = rstrcat(arg->data, "# EOF\n");
+
 	arg->rem_to_send = strlen(arg->data);
 	u16_t to_queue = min(arg->rem_to_send, tcp_sndbuf(pcb));
 	arg->queued = to_queue;
 	arg->rem_to_queue = arg->rem_to_send - to_queue;
 	tcp_arg(pcb, arg);
 	tcp_sent(pcb, server_sent);
+
 	err_t newerr = tcp_write(pcb, arg->data, to_queue, 0);
 	if (newerr == ERR_MEM) {
 		fatal_error(ERROR_WRITE_BEGIN_MEM);
@@ -191,6 +139,8 @@ err_t server_accept(void *, struct tcp_pcb *pcb, err_t err)
 		fatal_error(ERROR_WRITE_BEGIN);
 	}
 	tcp_output(pcb);
+
+	return ERR_OK;
 }
 
 static void srv_txt(struct mdns_service *service, void *)
@@ -204,38 +154,13 @@ static void srv_txt(struct mdns_service *service, void *)
 
 int main()
 {
-	{
-		/* Test vector from spec. */
-		uint8_t data[2] = {0xBE, 0xEF};
-		if (crc8(data) != 0x92)
-			fatal_error(ERROR_CHECKSUM_TEST);
-	}
-
 	i2c_init(i2c0, 100 * 1000);
-	gpio_set_function(OUR_SDA_PIN, GPIO_FUNC_I2C);
-	gpio_set_function(OUR_CLK_PIN, GPIO_FUNC_I2C);
-	gpio_pull_up(OUR_SDA_PIN);
-	gpio_pull_up(OUR_CLK_PIN);
+	gpio_set_function(our_sda_pin, GPIO_FUNC_I2C);
+	gpio_set_function(our_clk_pin, GPIO_FUNC_I2C);
+	gpio_pull_up(our_sda_pin);
+	gpio_pull_up(our_clk_pin);
 
-	{
-		/* Test sensor by reading serial */
-		uint8_t cmd = SHT_CMD_READSERIAL;
-		if (i2c_write_blocking(OUR_I2C, OUR_I2C_ADDR, &cmd, 1, false) != 1) {
-			fatal_error(ERROR_SHT_CHECKSERIAL_READ);
-		}
-
-		sleep_ms(SHT_DELAY_MEASURE);
-
-		uint8_t data[6] = { 0 };
-		if (i2c_read_blocking(OUR_I2C, OUR_I2C_ADDR, data, sizeof(data), false) != sizeof(data)) {
-			fatal_error(ERROR_SHT_CHECKSERIAL_WRITE);
-		}
-
-		if (crc8(data) != data[2])
-			fatal_error(ERROR_SHT_CHECKSERIAL_CHECKSUM);
-		if (crc8(data + 3) != data[5])
-			fatal_error(ERROR_SHT_CHECKSERIAL_CHECKSUM);
-	}
+	measure_init();
 
 	if (cyw43_arch_init_with_country(CYW43_COUNTRY_UK)) {
 		fatal_error(ERROR_INIT);

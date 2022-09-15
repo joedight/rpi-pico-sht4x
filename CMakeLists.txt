@@ -2,12 +2,14 @@ cmake_minimum_required(VERSION 3.12)
 include(pico_sdk_import.cmake)
 
 project(humidity C CXX ASM)
-set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD 23)
 
 set(PICO_BOARD "pico_w")
 pico_sdk_init()
 
-add_executable(humidity main.c)
+add_compile_options(-Wall -pedantic)
+
+add_executable(humidity sht4x.c)
 target_include_directories(humidity PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 pico_add_extra_outputs(humidity)
