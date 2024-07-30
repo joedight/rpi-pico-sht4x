@@ -34,6 +34,7 @@ enum error {
 	ERROR_GENERIC = 1,
 	ERROR_INIT,
 	ERROR_WLAN,
+	ERROR_MDNS,
 	ERROR_CREATE_PCB,
 	ERROR_BIND,
 	ERROR_LISTEN,
@@ -48,15 +49,20 @@ enum error {
 	ERROR_FINAL,
 };
 
+void flash_error(int err)
+{
+	for (int i = 0; i < err; i++) {
+		led_on(1);
+		sleep_ms(500);
+		led_on(0);
+		sleep_ms(500);
+	}
+}
+
 void fatal_error(int err)
 {
 	while (1) {
-		for (int i = 0; i < err; i++) {
-			led_on(1);
-			sleep_ms(500);
-			led_on(0);
-			sleep_ms(500);
-		}
+		flash_error(err);
 		sleep_ms(4500);
 	}
 }
@@ -154,13 +160,13 @@ static void srv_txt(struct mdns_service *service, void *)
 
 int main()
 {
-	i2c_init(i2c0, 100 * 1000);
-	gpio_set_function(our_sda_pin, GPIO_FUNC_I2C);
-	gpio_set_function(our_clk_pin, GPIO_FUNC_I2C);
-	gpio_pull_up(our_sda_pin);
-	gpio_pull_up(our_clk_pin);
+//	i2c_init(i2c0, 100 * 1000);
+//	gpio_set_function(our_sda_pin, GPIO_FUNC_I2C);
+//	gpio_set_function(our_clk_pin, GPIO_FUNC_I2C);
+//	gpio_pull_up(our_sda_pin);
+//	gpio_pull_up(our_clk_pin);
 
-	measure_init();
+//	measure_init();
 
 	if (cyw43_arch_init_with_country(CYW43_COUNTRY_UK)) {
 		fatal_error(ERROR_INIT);
@@ -169,11 +175,24 @@ int main()
 	cyw43_arch_enable_sta_mode();
 
 	led_on(1);
-	if (cyw43_arch_wifi_connect_blocking(wlan_ssid, wlan_pass, CYW43_AUTH_WPA2_AES_PSK) != 0) {
-		fatal_error(ERROR_WLAN);
-	}
-	led_on(0);
 
+	while (cyw43_arch_wifi_connect_blocking(wlan_ssid, wlan_pass, CYW43_AUTH_WPA2_AES_PSK) != 0) {
+		flash_error(ERROR_WLAN);
+		sleep_ms(300'000);
+	}
+
+	mdns_resp_init();
+	if (mdns_resp_add_netif(&cyw43_state.netif[CYW43_ITF_STA], CYW43_HOST_NAME) != ERR_OK) {
+		fatal_error(ERROR_MDNS);
+	}
+	/*
+	if (mdns_resp_add_service(netif_default, MDNS_SERVICE_NAME, "_prometheus-http", DNSSD_PROTO_TCP, 80, srv_txt, NULL) != ERR_OK) {
+		fatal_error(ERROR_MDNS);
+	}
+	*/
+	// mdns_resp_announce(netif_default);
+
+	/*
 	struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
 	if (!pcb) {
 		fatal_error(ERROR_CREATE_PCB);
@@ -189,16 +208,19 @@ int main()
 	}
 
 	tcp_accept(pcb, server_accept);
+	*/
 
-	sleep_ms(5000);
-	led_on(1);
+	led_on(0);
 
-	mdns_resp_add_service(netif_default, MDNS_SERVICE_NAME, "_prometheus-http", DNSSD_PROTO_TCP, 80, srv_txt, NULL);
-	mdns_resp_announce(netif_default);
-
+	uint64_t next_announce = time_us_64();
 	while (1) {
 		cyw43_arch_poll();
 		sleep_ms(1);
+		/* Should only be on addr change... */
+		if (time_us_64() >= next_announce) {
+			next_announce = time_us_64() + 1000ul * 1000 * 60 * 10;
+			mdns_resp_announce(netif_default);
+		}	
 	}
 
 	cyw43_arch_deinit();

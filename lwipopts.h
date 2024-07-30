@@ -52,13 +52,6 @@
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
 
-#define LWIP_MDNS_RESPONDER         1
-#define MEMP_NUM_UDP_PCB            2
-#define LWIP_NUM_NETIF_CLIENT_DATA  2
-#define LWIP_IGMP                   1
-#define LWIP_NETIF_EXT_STATUS_CALLBACK 1
-#define MDNS_RESP_USENETIF_EXTCALLBACK 1
-
 #ifndef NDEBUG
 #define LWIP_DEBUG                  1
 #define LWIP_STATS                  1
@@ -93,5 +86,23 @@
 #define PPP_DEBUG                   LWIP_DBG_OFF
 #define SLIP_DEBUG                  LWIP_DBG_OFF
 #define DHCP_DEBUG                  LWIP_DBG_OFF
+
+#define LWIP_MDNS_RESPONDER 1
+#define LWIP_IGMP 1
+#define LWIP_NUM_NETIF_CLIENT_DATA 1
+#define MDNS_RESP_USENETIF_EXTCALLBACK  1
+#define MEMP_NUM_SYS_TIMEOUT 10
+#define MEMP_NUM_TCP_PCB 12
+
+#if !NO_SYS
+#define TCPIP_THREAD_STACKSIZE 2048 // mDNS needs more stack
+#define DEFAULT_THREAD_STACKSIZE 1024
+#define DEFAULT_RAW_RECVMBOX_SIZE 8
+#define TCPIP_MBOX_SIZE 8
+#define LWIP_TIMEVAL_PRIVATE 0
+
+// not necessary, can be done either way
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 1
+#endif
 
 #endif /* __LWIPOPTS_H__ */
